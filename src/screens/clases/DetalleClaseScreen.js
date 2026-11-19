@@ -17,8 +17,9 @@ import api from '../../config/api';
 
 export default function DetalleClaseScreen({ route, navigation }) {
   const { user } = useAuth();
-  const { horario, onReserved } = route.params;
+  const { horario, onReserved, yaInscrito: yaInscritoParam } = route.params;
   const [loading, setLoading] = useState(false);
+  const [yaInscrito, setYaInscrito] = useState(Boolean(yaInscritoParam));
   const [advertenciaModal, setAdvertenciaModal] = useState({
     visible: false,
     mensaje: '',
@@ -176,7 +177,7 @@ export default function DetalleClaseScreen({ route, navigation }) {
         </View>
       </Card>
 
-      {/* Botón de Confirmación de Reserva o Gestión de Asistencia */}
+      {/* Botón de Confirmación de Reserva, Estado de Inscrito o Gestión de Asistencia */}
       {user?.rol === 'entrenador' && (horario.entrenador_nombre === user?.nombre || horario.id_usuario === user?.id_usuario) ? (
         <View style={{ marginTop: 12, marginBottom: 30 }}>
           <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)', borderWidth: 1, borderColor: '#3B82F6', borderRadius: 10, padding: 12, marginBottom: 10, flexDirection: 'row', alignItems: 'center' }}>
@@ -189,6 +190,26 @@ export default function DetalleClaseScreen({ route, navigation }) {
             title="Ver Asistencia de Alumnos"
             icon="people"
             onPress={() => navigation.navigate('AlumnosClase', { horario })}
+          />
+        </View>
+      ) : yaInscrito ? (
+        <View style={{ marginTop: 12, marginBottom: 30 }}>
+          <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: '#10B981', borderRadius: 12, padding: 14, marginBottom: 12, flexDirection: 'row', alignItems: 'center' }}>
+            <Ionicons name="checkmark-circle" size={26} color="#10B981" style={{ marginRight: 10 }} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#10B981', fontSize: 14, fontWeight: '800', marginBottom: 2 }}>
+                ¡Ya estás inscrito en esta clase!
+              </Text>
+              <Text style={{ color: '#E2E8F0', fontSize: 12, lineHeight: 17 }}>
+                Tu cupo está 100% asegurado. Puedes revisar tu cita, reprogramar o cancelarla desde tu panel de reservas.
+              </Text>
+            </View>
+          </View>
+          <CustomButton
+            title="Ir a Mis Reservas"
+            icon="calendar"
+            variant="outline"
+            onPress={() => navigation.navigate('ReservasTab')}
           />
         </View>
       ) : (

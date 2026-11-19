@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../theme/colors';
 import Card from '../../components/Card';
 import api from '../../config/api';
+
+const getHoyStr = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 
 const HORARIOS_SUGERIDOS = [
   '07:00',
@@ -42,6 +50,26 @@ export default function TrainerClasesScreen({ navigation }) {
   const [historialSustituciones, setHistorialSustituciones] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [filtroBandeja, setFiltroBandeja] = useState('hoy'); // 'hoy' (por defecto) | 'todas'
+
+  const hoyStr = getHoyStr();
+
+  const clasesFiltradas = useMemo(() => {
+    if (filtroBandeja === 'hoy') {
+      return clases.filter((c) => {
+        const fStr = typeof c.fecha === 'string' ? c.fecha.substring(0, 10) : new Date(c.fecha).toISOString().substring(0, 10);
+        return fStr === hoyStr;
+      });
+    }
+    return clases;
+  }, [clases, filtroBandeja, hoyStr]);
+
+  const totalClasesHoy = useMemo(() => {
+    return clases.filter((c) => {
+      const fStr = typeof c.fecha === 'string' ? c.fecha.substring(0, 10) : new Date(c.fecha).toISOString().substring(0, 10);
+      return fStr === hoyStr;
+    }).length;
+  }, [clases, hoyStr]);
 
   // Estados Modal Reprogramar (Límite 24h)
   const [modalReprogramar, setModalReprogramar] = useState(false);
@@ -404,28 +432,90 @@ export default function TrainerClasesScreen({ navigation }) {
           <Text style={styles.loadingText}>Cargando información del entrenador...</Text>
         </View>
       ) : tabActiva === 'clases' ? (
-        <FlatList
-          data={clases}
-          keyExtractor={(item) => item.id_horario.toString()}
-          renderItem={renderItem}
-          contentContainerStyle={styles.listContent}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.primary}
-            />
-          }
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="calendar-outline" size={50} color={colors.textMuted} style={{ marginBottom: 10 }} />
-              <Text style={styles.emptyTitle}>No tienes clases asignadas</Text>
-              <Text style={styles.emptySubtitle}>
-                Usa el botón de abajo o comunícate con administración para programar sesiones.
+        <>
+          {/* Subfiltro de bandeja: Solo Hoy vs Todas */}
+          <View style={styles.subFilterRow}>
+            <TouchableOpacity
+              style={[styles.subFilterPill, filtroBandeja === 'hoy' && styles.subFilterPillActive]}
+              onPress={() => setFiltroBandeja('hoy')}
+            >
+              <Ionicons
+                name="today"
+                size={13}
+                color={filtroBandeja === 'hoy' ? '#FFF' : colors.primary}
+                style={{ marginRight: 5 }}
+              />
+              <Text
+                style={[
+                  styles.subFilterPillText,
+                  filtroBandeja === 'hoy' && styles.subFilterPillTextActive,
+                ]}
+              >
+                Solo Hoy ({totalClasesHoy})
               </Text>
-            </View>
-          }
-        />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.subFilterPill, filtroBandeja === 'todas' && styles.subFilterPillActive]}
+              onPress={() => setFiltroBandeja('todas')}
+            >
+              <Ionicons
+                name="calendar-outline"
+                size={13}
+                color={filtroBandeja === 'todas' ? '#FFF' : colors.textSecondary}
+                style={{ marginRight: 5 }}
+              />
+              <Text
+                style={[
+                  styles.subFilterPillText,
+                  filtroBandeja === 'todas' && styles.subFilterPillTextActive,
+                ]}
+              >
+                Todas las Fechas ({clases.length})
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={clasesFiltradas}
+            keyExtractor={(item) => item.id_horario.toString()}
+            renderItem={renderItem}
+            contentContainerStyle={styles.listContent}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor={colors.primary}
+              />
+            }
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Ionicons name="calendar-outline" size={50} color={colors.textMuted} style={{ marginBottom: 10 }} />
+                <Text style={styles.emptyTitle}>
+                  {filtroBandeja === 'hoy'
+                    ? 'No tienes clases programadas para hoy'
+                    : 'No tienes clases asignadas'}
+                </Text>
+                <Text style={styles.emptySubtitle}>
+                  {filtroBandeja === 'hoy'
+                    ? 'Puedes revisar la pestaña "Todas las Fechas" o programar una nueva sesión.'
+                    : 'Usa el botón de abajo o comunícate con administración para programar sesiones.'}
+                </Text>
+                {filtroBandeja === 'hoy' && clases.length > 0 && (
+                  <TouchableOpacity
+                    style={[styles.subFilterPill, { marginTop: 12, backgroundColor: colors.card, borderColor: colors.primary, borderWidth: 1 }]}
+                    onPress={() => setFiltroBandeja('todas')}
+                  >
+                    <Ionicons name="calendar" size={14} color={colors.primary} style={{ marginRight: 6 }} />
+                    <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 13 }}>
+                      Ver mis {clases.length} clases de otras fechas
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            }
+          />
+        </>
       ) : (
         <FlatList
           data={historialSustituciones}
@@ -892,6 +982,34 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: colors.textSecondary,
     textAlign: 'center',
+  },
+  subFilterRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    gap: 8,
+    marginBottom: 10,
+  },
+  subFilterPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  subFilterPillActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  subFilterPillText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  subFilterPillTextActive: {
+    color: '#FFF',
   },
   fabButton: {
     position: 'absolute',

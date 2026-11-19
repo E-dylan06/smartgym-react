@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import io from 'socket.io-client';
 import { getServerUrl } from '../config/api';
 
@@ -22,22 +23,7 @@ export const setupNotificationChannelsAndPermissions = async () => {
   if (isInitialized) return true;
 
   try {
-    // 1. Canal de alta prioridad para Android (imprescindible para que levante el banner nativo)
-    if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('smartgym_channel', {
-        name: 'SmartGym Avisos y Citas',
-        description: 'Notificaciones en tiempo real sobre tus reservas, cupos y avisos del gimnasio',
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        lightColor: '#FF5722',
-        sound: 'default',
-        enableLights: true,
-        enableVibrate: true,
-        showBadge: true,
-      });
-    }
-
-    // 2. Solicitar permisos al sistema operativo
+    // 1. Solicitar permisos al sistema operativo primero
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
 
@@ -46,15 +32,32 @@ export const setupNotificationChannelsAndPermissions = async () => {
       finalStatus = status;
     }
 
+    // 2. Configurar canal de Android de forma segura (tolerante a Expo Go)
+    if (Platform.OS === 'android') {
+      try {
+        await Notifications.setNotificationChannelAsync('smartgym_channel', {
+          name: 'SmartGym Avisos y Citas',
+          description: 'Notificaciones sobre tus reservas y clases',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#FF5722',
+          enableLights: true,
+          enableVibrate: true,
+          showBadge: true,
+        });
+      } catch (chanErr) {
+        // En Expo Go (SDK 53+) los canales remotos pueden ser limitados por el cliente nativo
+      }
+    }
+
     if (finalStatus !== 'granted') {
-      console.warn('⚠️ Permiso de notificaciones no otorgado por el usuario.');
       return false;
     }
 
     isInitialized = true;
     return true;
   } catch (err) {
-    console.warn('Error al configurar permisos de notificaciones:', err.message);
+    // Silenciar error en Expo Go para evitar advertencias molestas
     return false;
   }
 };
@@ -68,7 +71,6 @@ export const registerForPushNotificationsAsync = async (apiClient) => {
     if (!hasPermission) return null;
 
     const tokenData = await Notifications.getExpoPushTokenAsync().catch((err) => {
-      console.log('Push token no generado (habitual en emuladores de desarrollo):', err.message);
       return null;
     });
 
@@ -81,7 +83,6 @@ export const registerForPushNotificationsAsync = async (apiClient) => {
     }
     return null;
   } catch (e) {
-    console.warn('Error registrando push token en backend:', e.message);
     return null;
   }
 };
@@ -89,9 +90,8 @@ export const registerForPushNotificationsAsync = async (apiClient) => {
 /**
  * Conecta el socket al backend de SmartGym para escuchar señales en tiempo real
  */
-export const connectNotificationSocket = async (user, onNotificationReceived) => {
+export const connectNotificationSocket = async (user, onNotificationReceived, explicitToken = null) => {
   try {
-    // Configurar permisos y canal primero
     await setupNotificationChannelsAndPermissions();
 
     const serverUrl = await getServerUrl();
@@ -101,10 +101,16 @@ export const connectNotificationSocket = async (user, onNotificationReceived) =>
       socket.disconnect();
     }
 
+    const token = explicitToken || user?.token || (await AsyncStorage.getItem('@smartgym_token'));
+
     console.log(`📡 Conectando Socket.IO para notificaciones en: ${serverUrl}`);
 
     socket = io(serverUrl, {
       transports: ['websocket', 'polling'],
+      auth: {
+        token: token || '',
+      },
+      extraHeaders: token ? { Authorization: `Bearer ${token}` } : {},
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 2000,
@@ -116,6 +122,7 @@ export const connectNotificationSocket = async (user, onNotificationReceived) =>
         socket.emit('registrar_usuario', {
           id_usuario: user.id_usuario,
           rol: user.rol || user.rol_nombre,
+          token: token || '',
         });
       }
     });

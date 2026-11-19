@@ -31,8 +31,30 @@ const getFechaNormalizada = (f) => {
   return d.toISOString().substring(0, 10);
 };
 
+// Verifica si una clase es estrictamente futura respecto a la fecha Y hora actual
+const esHorarioFuturo = (fecha, horaInicio) => {
+  if (!fecha) return false;
+  const f = getFechaNormalizada(fecha);
+  const hoy = getHoyStr();
+  if (f < hoy) return false;
+  if (f > hoy) return true;
+
+  // Si la fecha es hoy, comparamos la hora de inicio con la hora actual
+  try {
+    const hora = (horaInicio || '00:00:00').substring(0, 8);
+    const [hh, mm, ss] = hora.split(':').map((n) => parseInt(n, 10) || 0);
+    const ahora = new Date();
+    const claseDate = new Date();
+    claseDate.setHours(hh, mm, ss || 0, 0);
+    return claseDate > ahora;
+  } catch {
+    return true;
+  }
+};
+
 export default function ClasesScreen({ navigation }) {
   const [horarios, setHorarios] = useState([]);
+  const [misReservasIds, setMisReservasIds] = useState(new Set());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
@@ -47,15 +69,24 @@ export default function ClasesScreen({ navigation }) {
 
   const fetchHorarios = async () => {
     try {
-      // Pedimos al backend únicamente fechas desde hoy en adelante (no días anteriores)
-      const res = await api.get(`/horarios?fecha_desde=${hoyStr}`);
-      if (res.data.ok) {
-        const todos = res.data.data.horarios || [];
-        // Filtro estricto en frontend: sólo hoy y días posteriores (NUNCA días anteriores)
-        const validos = todos.filter((h) => {
-          const f = getFechaNormalizada(h.fecha);
-          return f >= hoyStr;
-        });
+      // Consultar en paralelo los horarios disponibles y las reservas del usuario
+      const [resHorarios, resReservas] = await Promise.allSettled([
+        api.get(`/horarios?fecha_desde=${hoyStr}`),
+        api.get('/reservas/mis-reservas'),
+      ]);
+
+      if (resReservas.status === 'fulfilled' && resReservas.value?.data?.ok) {
+        const proximas = resReservas.value.data.data?.proximas || [];
+        const ids = new Set(
+          proximas.filter((r) => r.estado === 'confirmada').map((r) => r.id_horario)
+        );
+        setMisReservasIds(ids);
+      }
+
+      if (resHorarios.status === 'fulfilled' && resHorarios.value?.data?.ok) {
+        const todos = resHorarios.value.data.data.horarios || [];
+        // Filtro estricto: sólo clases con fecha y hora estrictamente futuras
+        const validos = todos.filter((h) => esHorarioFuturo(h.fecha, h.hora_inicio));
         setHorarios(validos);
         setIsOffline(false);
         // Persistir en caché local
@@ -70,10 +101,9 @@ export default function ClasesScreen({ navigation }) {
         const cached = await AsyncStorage.getItem('@smartgym_cache_horarios');
         if (cached) {
           const parsed = JSON.parse(cached);
-          const validos = (parsed.horarios || []).filter((h) => {
-            const f = getFechaNormalizada(h.fecha);
-            return f >= hoyStr;
-          });
+          const validos = (parsed.horarios || []).filter((h) =>
+            esHorarioFuturo(h.fecha, h.hora_inicio)
+          );
           setHorarios(validos);
           setIsOffline(true);
         }
@@ -118,10 +148,10 @@ export default function ClasesScreen({ navigation }) {
     const mananaStr = manana.toISOString().substring(0, 10);
 
     return horarios.filter((h) => {
-      const f = getFechaNormalizada(h.fecha);
+      // Regla Mandatoria: Excluir clases cuya fecha y hora de inicio ya hayan pasado
+      if (!esHorarioFuturo(h.fecha, h.hora_inicio)) return false;
 
-      // Regla Mandatoria: Excluir días anteriores estrictamente
-      if (f < hoyStr) return false;
+      const f = getFechaNormalizada(h.fecha);
 
       // Filtro por Fecha
       if (filtroFecha === 'hoy' && f !== hoyStr) return false;
@@ -182,6 +212,7 @@ export default function ClasesScreen({ navigation }) {
     const fStr = getFechaNormalizada(item.fecha);
     const fObj = new Date(item.fecha);
     const esHoy = fStr === hoyStr;
+    const yaInscrito = misReservasIds.has(item.id_horario);
 
     const fechaFormateada = esHoy
       ? `Hoy, ${fObj.toLocaleDateString('es-PE', { day: 'numeric', month: 'short' })}`
@@ -197,6 +228,7 @@ export default function ClasesScreen({ navigation }) {
         onPress={() =>
           navigation.navigate('DetalleClase', {
             horario: item,
+            yaInscrito,
             onReserved: fetchHorarios,
           })
         }
@@ -211,7 +243,14 @@ export default function ClasesScreen({ navigation }) {
                 </View>
               )}
             </View>
-            {renderBadgeCupos(item.cupos_disponibles, item.capacidad_maxima, item.estado)}
+            {yaInscrito ? (
+              <View style={[styles.badge, { backgroundColor: 'rgba(16, 185, 129, 0.2)', borderWidth: 1, borderColor: '#10B981' }]}>
+                <Ionicons name="checkmark-circle" size={11} color="#10B981" style={{ marginRight: 4 }} />
+                <Text style={[styles.badgeText, { color: '#10B981', fontWeight: '800' }]}>YA INSCRITO</Text>
+              </View>
+            ) : (
+              renderBadgeCupos(item.cupos_disponibles, item.capacidad_maxima, item.estado)
+            )}
           </View>
 
           <Text style={styles.claseTitulo}>{item.clase_nombre}</Text>

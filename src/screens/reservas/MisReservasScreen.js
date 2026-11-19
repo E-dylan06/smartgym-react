@@ -26,6 +26,13 @@ const MOTIVOS_PREDETERMINADOS = [
   'Otro motivo',
 ];
 
+const MESES_NOMBRES = [
+  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+];
+
+const DIAS_SEMANA_CORTO = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+
 const getFechaNormalizada = (f) => {
   if (!f) return '';
   if (typeof f === 'string') return f.substring(0, 10);
@@ -34,6 +41,53 @@ const getFechaNormalizada = (f) => {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+};
+
+// Verifica si una clase es estrictamente futura respecto a la fecha y hora actual
+const esHorarioFuturo = (fechaStr, horaInicioStr) => {
+  if (!fechaStr) return false;
+  try {
+    const fStr = typeof fechaStr === 'string' ? fechaStr.substring(0, 10) : new Date(fechaStr).toISOString().substring(0, 10);
+    const hStr = (horaInicioStr || '00:00:00').substring(0, 8);
+    const [y, m, d] = fStr.split('-').map(Number);
+    const [hh, mm, ss] = hStr.split(':').map(Number);
+    const fechaHoraClase = new Date(y, m - 1, d, hh, mm || 0, ss || 0);
+    return fechaHoraClase > new Date();
+  } catch {
+    return false;
+  }
+};
+
+// Verifica si la fecha está dentro de 1 semana (7 días) posterior al día de hoy
+const dentroDeUnaSemana = (fechaStr) => {
+  if (!fechaStr) return false;
+  try {
+    const fStr = typeof fechaStr === 'string' ? fechaStr.substring(0, 10) : new Date(fechaStr).toISOString().substring(0, 10);
+    const dLimite = new Date();
+    dLimite.setDate(dLimite.getDate() + 7);
+    const y = dLimite.getFullYear();
+    const m = String(dLimite.getMonth() + 1).padStart(2, '0');
+    const d = String(dLimite.getDate()).padStart(2, '0');
+    const limiteStr = `${y}-${m}-${d}`;
+    return fStr <= limiteStr;
+  } catch {
+    return false;
+  }
+};
+
+// Verifica si pertenece exactamente al mismo profesor
+const esMismoProfesor = (horario, reserva) => {
+  if (!reserva) return true;
+  if (reserva.id_entrenador && horario.id_entrenador) {
+    return Number(horario.id_entrenador) === Number(reserva.id_entrenador);
+  }
+  if (reserva.entrenador_nombre && horario.entrenador_nombre) {
+    return (
+      reserva.entrenador_nombre.trim().toLowerCase() ===
+      horario.entrenador_nombre.trim().toLowerCase()
+    );
+  }
+  return false;
 };
 
 const formatearFecha = (f) => {
@@ -67,7 +121,12 @@ export default function MisReservasScreen() {
   // Filtros
   const [search, setSearch] = useState('');
   const [filtroFecha, setFiltroFecha] = useState('todas'); // 'todas' | 'hoy' | 'semana' | 'mes'
+  const [fechaExacta, setFechaExacta] = useState(null); // 'YYYY-MM-DD' o null
   const [filtroDisciplina, setFiltroDisciplina] = useState('todas');
+
+  // Estados para Calendario Interactivo
+  const [modalCalendarioVisible, setModalCalendarioVisible] = useState(false);
+  const [mesCalendario, setMesCalendario] = useState(new Date());
 
   // Estados para modal de reprogramación
   const [modalVisible, setModalVisible] = useState(false);
@@ -122,6 +181,34 @@ export default function MisReservasScreen() {
     fetchReservas();
   };
 
+  // Verifica si una clase es modificable (no es pasada y faltan >= 1 hora)
+  const esClaseModificable = (item) => {
+    if (item.estado !== 'confirmada') return false;
+    if (!item.fecha) return false;
+    try {
+      const fStr = typeof item.fecha === 'string'
+        ? item.fecha.substring(0, 10)
+        : new Date(item.fecha).toISOString().substring(0, 10);
+      const hStr = (item.hora_inicio || '00:00:00').substring(0, 8);
+      const [y, m, d] = fStr.split('-').map(Number);
+      const [hh, mm, ss] = hStr.split(':').map(Number);
+      const fechaHoraClase = new Date(y, m - 1, d, hh, mm || 0, ss || 0);
+      const ahora = new Date();
+
+      // Regla 1: Si la fecha u hora ya pasaron respecto a la hora actual -> NO PERMITIR
+      if (fechaHoraClase <= ahora) {
+        return false;
+      }
+
+      // Regla 2: Límite de 1 hora de anticipación
+      const diffMs = fechaHoraClase.getTime() - ahora.getTime();
+      const diffHoras = diffMs / (1000 * 60 * 60);
+      return diffHoras >= 1;
+    } catch {
+      return false;
+    }
+  };
+
   const handleCancelarReserva = (reserva) => {
     Alert.alert(
       'Cancelar Reserva',
@@ -153,7 +240,6 @@ export default function MisReservasScreen() {
     }
   };
 
-  // Abrir Modal de Reprogramación
   const abrirModalReprogramar = async (reserva) => {
     setReservaSeleccionada(reserva);
     setNuevoHorarioId(null);
@@ -163,35 +249,50 @@ export default function MisReservasScreen() {
     setLoadingHorarios(true);
 
     try {
-      // Excluir días anteriores al reprogramar
-      const hoy = new Date().toISOString().substring(0, 10);
-      const res = await api.get(`/horarios?fecha_desde=${hoy}`);
+      const hoyStr = getFechaNormalizada(new Date());
+      const queryParams = new URLSearchParams();
+      queryParams.append('fecha_desde', hoyStr);
+      if (reserva.id_entrenador) {
+        queryParams.append('id_entrenador', reserva.id_entrenador);
+      }
+
+      const res = await api.get(`/horarios?${queryParams.toString()}`);
       if (res.data.ok) {
         const todos = res.data.data.horarios || [];
-        const filtrados = todos.filter((h) => {
+        const disponibles = todos.filter((h) => {
+          // 1. Excluir el horario actual de la reserva
           if (h.id_horario === reserva.id_horario) return false;
+          // 2. Solo clases con cupos disponibles
           if (h.cupos_disponibles <= 0) return false;
-          const f = getFechaNormalizada(h.fecha);
-          return f >= hoy;
+          // 3. Solo del mismo profesor en el que estaba
+          if (!esMismoProfesor(h, reserva)) return false;
+          // 4. No mostrar clases anteriores (solo clases futuras respecto a fecha y hora actual)
+          if (!esHorarioFuturo(h.fecha, h.hora_inicio)) return false;
+          // 5. Límite de 1 semana (7 días) posterior al día de hoy
+          if (!dentroDeUnaSemana(h.fecha)) return false;
+          return true;
         });
-        setHorariosDisponibles(filtrados);
+        setHorariosDisponibles(disponibles);
       }
     } catch (err) {
-      Alert.alert('Error', 'No se pudieron cargar los horarios disponibles.');
+      console.warn('Error cargando horarios disponibles:', err.message);
+      Alert.alert('Error', 'No se pudieron cargar horarios para reprogramar.');
     } finally {
       setLoadingHorarios(false);
     }
   };
 
-  const confirmarReprogramacion = async () => {
+  const ejecutarReprogramacion = async () => {
     if (!nuevoHorarioId) {
-      Alert.alert('Selección requerida', 'Por favor selecciona el nuevo horario al que deseas cambiarte.');
+      Alert.alert('Selección requerida', 'Por favor selecciona el nuevo horario al que deseas cambiar tu clase.');
       return;
     }
 
-    const motivoFinal = motivoTexto.trim()
-      ? `${motivoSeleccionado}: ${motivoTexto.trim()}`
-      : motivoSeleccionado;
+    const motivoFinal = motivoSeleccionado === 'Otro motivo' ? motivoTexto.trim() : motivoSeleccionado;
+    if (!motivoFinal) {
+      Alert.alert('Motivo requerido', 'Por favor describe brevemente el motivo de la reprogramación.');
+      return;
+    }
 
     try {
       setGuardandoReprogramacion(true);
@@ -216,9 +317,70 @@ export default function MisReservasScreen() {
     }
   };
 
-  // Extraer tipos de disciplinas presentes
+  // Base de datos de reservas de la pestaña activa
   const listaBase = activeTab === 'proximas' ? proximas : historial;
 
+  // Fechas que tienen reservas registradas para marcar con puntos en el calendario
+  const fechasConReservas = useMemo(() => {
+    const set = new Set();
+    listaBase.forEach((r) => {
+      if (r.fecha) {
+        set.add(getFechaNormalizada(r.fecha));
+      }
+    });
+    return set;
+  }, [listaBase]);
+
+  // Generador de la cuadrícula mensual del calendario
+  const diasCalendario = useMemo(() => {
+    const año = mesCalendario.getFullYear();
+    const mes = mesCalendario.getMonth();
+
+    const primerDia = new Date(año, mes, 1);
+    const ultimoDia = new Date(año, mes + 1, 0);
+    const totalDias = ultimoDia.getDate();
+
+    let primerDiaSemana = primerDia.getDay() - 1; // 0 = Lunes, 6 = Domingo
+    if (primerDiaSemana === -1) primerDiaSemana = 6;
+
+    const dias = [];
+    for (let i = 0; i < primerDiaSemana; i++) {
+      dias.push({ esVacio: true, id: `empty-${i}` });
+    }
+
+    for (let d = 1; d <= totalDias; d++) {
+      const diaStr = String(d).padStart(2, '0');
+      const mesStr = String(mes + 1).padStart(2, '0');
+      const fechaISO = `${año}-${mesStr}-${diaStr}`;
+      const tieneReserva = fechasConReservas.has(fechaISO);
+      dias.push({
+        esVacio: false,
+        numero: d,
+        fechaISO,
+        tieneReserva,
+        id: fechaISO,
+      });
+    }
+
+    return dias;
+  }, [mesCalendario, fechasConReservas]);
+
+  const cambiarMesCalendario = (offset) => {
+    setMesCalendario((prev) => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const seleccionarFechaCalendario = (fechaISO) => {
+    setFechaExacta(fechaISO);
+    setFiltroFecha('exacta');
+    setModalCalendarioVisible(false);
+  };
+
+  const limpiarFiltroFecha = () => {
+    setFechaExacta(null);
+    setFiltroFecha('todas');
+  };
+
+  // Extraer tipos de disciplinas presentes
   const disciplinasPresentes = useMemo(() => {
     const set = new Set();
     listaBase.forEach((r) => {
@@ -247,17 +409,22 @@ export default function MisReservasScreen() {
     return listaBase.filter((item) => {
       const f = getFechaNormalizada(item.fecha);
 
-      // Filtro por fecha
-      if (filtroFecha === 'hoy' && f !== hoyStr) return false;
-      if (filtroFecha === 'semana' && (f < inicioSemana || f > finSemana)) return false;
-      if (filtroFecha === 'mes' && !f.startsWith(mesActual)) return false;
+      // 1. Filtro por fecha exacta (Calendario)
+      if (fechaExacta) {
+        if (f !== fechaExacta) return false;
+      } else {
+        // Filtros rápidos
+        if (filtroFecha === 'hoy' && f !== hoyStr) return false;
+        if (filtroFecha === 'semana' && (f < inicioSemana || f > finSemana)) return false;
+        if (filtroFecha === 'mes' && !f.startsWith(mesActual)) return false;
+      }
 
-      // Filtro por disciplina
+      // 2. Filtro por disciplina
       if (filtroDisciplina !== 'todas' && item.clase_nombre !== filtroDisciplina) {
         return false;
       }
 
-      // Buscador
+      // 3. Buscador
       if (search.trim()) {
         const q = search.toLowerCase();
         const coincideClase = item.clase_nombre?.toLowerCase().includes(q);
@@ -267,7 +434,7 @@ export default function MisReservasScreen() {
 
       return true;
     });
-  }, [listaBase, filtroFecha, filtroDisciplina, search]);
+  }, [listaBase, filtroFecha, fechaExacta, filtroDisciplina, search]);
 
   const renderBadgeEstado = (estado, tieneReprogramacion) => {
     switch (estado) {
@@ -305,10 +472,59 @@ export default function MisReservasScreen() {
     }
   };
 
+  // Render del estado de asistencia: Verde con check "Asistió", Rojo con cruz "No asistió", Azul "Pendiente"
+  const renderIndicadorAsistencia = (item) => {
+    const fStr = typeof item.fecha === 'string'
+      ? item.fecha.substring(0, 10)
+      : new Date(item.fecha).toISOString().substring(0, 10);
+    const hStr = (item.hora_inicio || '00:00:00').substring(0, 8);
+    const [y, m, d] = fStr.split('-').map(Number);
+    const [hh, mm] = hStr.split(':').map(Number);
+    const fechaHoraClase = new Date(y, m - 1, d, hh, mm || 0);
+    const yaOcurrio = fechaHoraClase < new Date();
+
+    // 1. Sí asistió (Verde)
+    if (item.asistio === 'si' || item.asistio === true || item.asistio === 1) {
+      return (
+        <View style={[styles.asistenciaBadge, styles.asistenciaBadgeVerde]}>
+          <Ionicons name="checkmark-circle" size={14} color="#10B981" style={{ marginRight: 5 }} />
+          <Text style={styles.asistenciaTextVerde}>Asistió</Text>
+        </View>
+      );
+    }
+
+    // 2. No asistió (Rojo - en clases pasadas no registradas o marcadas como 'no')
+    if (item.asistio === 'no' || (yaOcurrio && item.estado !== 'cancelada')) {
+      return (
+        <View style={[styles.asistenciaBadge, styles.asistenciaBadgeRojo]}>
+          <Ionicons name="close-circle" size={14} color="#EF4444" style={{ marginRight: 5 }} />
+          <Text style={styles.asistenciaTextRojo}>No asistió</Text>
+        </View>
+      );
+    }
+
+    // 3. Cancelada
+    if (item.estado === 'cancelada') {
+      return (
+        <View style={[styles.asistenciaBadge, styles.asistenciaBadgeGris]}>
+          <Ionicons name="ban-outline" size={14} color="#94A3B8" style={{ marginRight: 5 }} />
+          <Text style={styles.asistenciaTextGris}>Cancelada</Text>
+        </View>
+      );
+    }
+
+    // 4. Pendiente (Clase futura)
+    return (
+      <View style={[styles.asistenciaBadge, styles.asistenciaBadgeAzul]}>
+        <Ionicons name="hourglass-outline" size={14} color="#38BDF8" style={{ marginRight: 5 }} />
+        <Text style={styles.asistenciaTextAzul}>Pendiente de sesión</Text>
+      </View>
+    );
+  };
+
   const renderItem = ({ item }) => {
     const fechaFormateada = formatearFecha(item.fecha);
-
-    const esActiva = item.estado === 'confirmada';
+    const puedeModificar = esClaseModificable(item);
 
     return (
       <Card style={styles.card}>
@@ -337,16 +553,12 @@ export default function MisReservasScreen() {
             </Text>
           </View>
 
-          <View style={[styles.iconTextRow, { marginTop: 4 }]}>
-            <Ionicons
-              name={item.asistio === 'si' ? 'checkmark-circle' : 'hourglass-outline'}
-              size={14}
-              color={item.asistio === 'si' ? colors.secondary : colors.textMuted}
-              style={{ marginRight: 6 }}
-            />
-            <Text style={styles.detailText}>
-              Asistencia: {item.asistio === 'si' ? 'Asistió' : 'Pendiente de registro'}
+          {/* Estado de Asistencia Destacado */}
+          <View style={[styles.iconTextRow, { marginTop: 6, alignItems: 'center' }]}>
+            <Text style={[styles.detailText, { marginRight: 6, fontWeight: '700' }]}>
+              Asistencia:
             </Text>
+            {renderIndicadorAsistencia(item)}
           </View>
 
           {item.reprogramacion_motivo && (
@@ -359,7 +571,8 @@ export default function MisReservasScreen() {
           )}
         </View>
 
-        {esActiva && (
+        {/* Solo mostrar opciones de reprogramar/cancelar si NO es clase pasada y falta al menos 1 hora */}
+        {puedeModificar && (
           <View style={styles.actionRow}>
             <TouchableOpacity
               style={styles.reprogramButton}
@@ -389,12 +602,14 @@ export default function MisReservasScreen() {
     );
   };
 
+  const hoyISO = getFechaNormalizada(new Date());
+
   return (
     <View style={styles.container}>
       <View style={styles.screenHeader}>
         <Text style={styles.screenTitle}>Mis Reservas</Text>
         <Text style={styles.screenSubtitle}>
-          Consulta tus citas programadas, filtra por fecha o clase, y reprograma cupos
+          Consulta tus citas programadas, filtra por fecha exacta en el calendario y gestiona tus cupos
         </Text>
 
         {isOffline && (
@@ -414,6 +629,7 @@ export default function MisReservasScreen() {
               setActiveTab('proximas');
               setFiltroDisciplina('todas');
               setFiltroFecha('todas');
+              setFechaExacta(null);
             }}
           >
             <Text
@@ -432,6 +648,7 @@ export default function MisReservasScreen() {
               setActiveTab('historial');
               setFiltroDisciplina('todas');
               setFiltroFecha('todas');
+              setFechaExacta(null);
             }}
           >
             <Text
@@ -463,23 +680,54 @@ export default function MisReservasScreen() {
         )}
       </View>
 
-      {/* FILTROS POR FECHA Y DISCIPLINA */}
+      {/* FILTROS POR FECHA (CALENDARIO + CHIPS) Y DISCIPLINA */}
       <View style={styles.filtersSection}>
-        {/* Filtro por fecha */}
+        {/* Barra de Filtro de Fecha con Botón de Calendario */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterScroll}>
           <Text style={styles.filterLabel}>Fecha:</Text>
+
+          {/* Botón interactivo de Calendario */}
+          <TouchableOpacity
+            style={[styles.calendarFilterBtn, fechaExacta && styles.calendarFilterBtnActive]}
+            onPress={() => setModalCalendarioVisible(true)}
+          >
+            <Ionicons
+              name="calendar"
+              size={14}
+              color={fechaExacta ? '#FFF' : colors.primary}
+              style={{ marginRight: 5 }}
+            />
+            <Text style={[styles.calendarFilterBtnText, fechaExacta && { color: '#FFF' }]}>
+              {fechaExacta ? `Día: ${formatearFecha(fechaExacta)}` : 'Ver Calendario'}
+            </Text>
+            {fechaExacta && (
+              <TouchableOpacity
+                onPress={(e) => {
+                  e.stopPropagation();
+                  limpiarFiltroFecha();
+                }}
+                style={{ marginLeft: 6 }}
+              >
+                <Ionicons name="close-circle" size={14} color="#FFF" />
+              </TouchableOpacity>
+            )}
+          </TouchableOpacity>
+
           {[
             { id: 'todas', label: 'Todas' },
             { id: 'hoy', label: 'Hoy' },
             { id: 'semana', label: 'Esta semana' },
             { id: 'mes', label: 'Este mes' },
           ].map((f) => {
-            const isSel = filtroFecha === f.id;
+            const isSel = !fechaExacta && filtroFecha === f.id;
             return (
               <TouchableOpacity
                 key={f.id}
                 style={[styles.filterChip, isSel && styles.filterChipSelected]}
-                onPress={() => setFiltroFecha(f.id)}
+                onPress={() => {
+                  setFechaExacta(null);
+                  setFiltroFecha(f.id);
+                }}
               >
                 <Text style={[styles.filterChipText, isSel && styles.filterChipTextSelected]}>
                   {f.label}
@@ -523,18 +771,19 @@ export default function MisReservasScreen() {
       <View style={styles.countRow}>
         <Text style={styles.countText}>
           Mostrando {reservasFiltradas.length} reserva(s) {activeTab === 'proximas' ? 'actuales' : 'anteriores'}
+          {fechaExacta ? ` del ${formatearFecha(fechaExacta)}` : ''}
         </Text>
       </View>
 
       {loading ? (
         <View style={styles.centerContainer}>
-          <ActivityIndicator color={colors.primary} size="large" />
+          <ActivityIndicator size="large" color={colors.primary} />
           <Text style={styles.loadingText}>Cargando reservas...</Text>
         </View>
       ) : (
         <FlatList
           data={reservasFiltradas}
-          keyExtractor={(item) => item.id_reserva.toString()}
+          keyExtractor={(item) => String(item.id_reserva)}
           renderItem={renderItem}
           contentContainerStyle={styles.listContent}
           refreshControl={
@@ -546,93 +795,243 @@ export default function MisReservasScreen() {
           }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Ionicons name="clipboard-outline" size={48} color={colors.textMuted} style={{ marginBottom: 10 }} />
-              <Text style={styles.emptyText}>
-                {search || filtroFecha !== 'todas' || filtroDisciplina !== 'todas'
-                  ? 'No se encontraron reservas con los filtros seleccionados'
+              <Ionicons
+                name={activeTab === 'proximas' ? 'calendar-outline' : 'time-outline'}
+                size={54}
+                color={colors.textMuted}
+                style={{ marginBottom: 12 }}
+              />
+              <Text style={styles.emptyTitle}>
+                {search || filtroFecha !== 'todas' || filtroDisciplina !== 'todas' || fechaExacta
+                  ? 'No se encontraron reservas con esos filtros'
                   : activeTab === 'proximas'
-                  ? 'No tienes clases programadas activas'
-                  : 'Aún no cuentas con historial de reservas pasadas'}
+                  ? 'No tienes reservas próximas activas'
+                  : 'Aún no tienes un historial de reservas pasadas'}
               </Text>
+              <Text style={styles.emptyText}>
+                {search || filtroFecha !== 'todas' || filtroDisciplina !== 'todas' || fechaExacta
+                  ? 'Intenta restablecer los filtros de fecha o búsqueda para ver más clases.'
+                  : activeTab === 'proximas'
+                  ? 'Explora el catálogo de disciplinas y agenda tu próxima sesión.'
+                  : 'Las clases completadas o canceladas aparecerán aquí como registro.'}
+              </Text>
+              {fechaExacta && (
+                <TouchableOpacity style={styles.clearFilterBtn} onPress={limpiarFiltroFecha}>
+                  <Ionicons name="refresh-outline" size={15} color="#FFF" style={{ marginRight: 6 }} />
+                  <Text style={styles.clearFilterBtnText}>Ver todas las fechas</Text>
+                </TouchableOpacity>
+              )}
             </View>
           }
         />
       )}
 
-      {/* MODAL DE REPROGRAMACIÓN DE RESERVA */}
+      {/* =========================================================================
+          MODAL DE CALENDARIO INTERACTIVO (Filtro por Fecha Exacta)
+          ========================================================================= */}
+      <Modal
+        visible={modalCalendarioVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setModalCalendarioVisible(false)}
+      >
+        <View style={styles.calendarModalOverlay}>
+          <View style={styles.calendarModalContent}>
+            {/* Cabecera del Calendario */}
+            <View style={styles.calendarHeaderRow}>
+              <View>
+                <Text style={styles.calendarModalTitle}>Calendario de Clases</Text>
+                <Text style={styles.calendarModalSubtitle}>
+                  Selecciona una fecha para ver tus reservas exactas
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.modalCloseBtn}
+                onPress={() => setModalCalendarioVisible(false)}
+              >
+                <Ionicons name="close" size={22} color={colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Controles de Navegación de Mes */}
+            <View style={styles.monthNavRow}>
+              <TouchableOpacity
+                style={styles.monthNavBtn}
+                onPress={() => cambiarMesCalendario(-1)}
+              >
+                <Ionicons name="chevron-back" size={20} color={colors.primary} />
+              </TouchableOpacity>
+              <Text style={styles.monthNavText}>
+                {MESES_NOMBRES[mesCalendario.getMonth()]} {mesCalendario.getFullYear()}
+              </Text>
+              <TouchableOpacity
+                style={styles.monthNavBtn}
+                onPress={() => cambiarMesCalendario(1)}
+              >
+                <Ionicons name="chevron-forward" size={20} color={colors.primary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Días de la semana */}
+            <View style={styles.weekDaysRow}>
+              {DIAS_SEMANA_CORTO.map((dia, idx) => (
+                <Text key={idx} style={styles.weekDayHeader}>
+                  {dia}
+                </Text>
+              ))}
+            </View>
+
+            {/* Cuadrícula de Días */}
+            <View style={styles.calendarGrid}>
+              {diasCalendario.map((dia) => {
+                if (dia.esVacio) {
+                  return <View key={dia.id} style={styles.calendarDayEmpty} />;
+                }
+
+                const esSeleccionado = fechaExacta === dia.fechaISO;
+                const esHoy = hoyISO === dia.fechaISO;
+
+                return (
+                  <TouchableOpacity
+                    key={dia.id}
+                    style={[
+                      styles.calendarDayCell,
+                      esHoy && styles.calendarDayCellToday,
+                      esSeleccionado && styles.calendarDayCellSelected,
+                    ]}
+                    onPress={() => seleccionarFechaCalendario(dia.fechaISO)}
+                  >
+                    <Text
+                      style={[
+                        styles.calendarDayNumber,
+                        esHoy && styles.calendarDayNumberToday,
+                        esSeleccionado && styles.calendarDayNumberSelected,
+                      ]}
+                    >
+                      {dia.numero}
+                    </Text>
+
+                    {/* Puntito indicador si hay reserva en esta fecha */}
+                    {dia.tieneReserva && (
+                      <View
+                        style={[
+                          styles.calendarDot,
+                          esSeleccionado && { backgroundColor: '#FFF' },
+                        ]}
+                      />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {/* Leyenda y Acciones Rápidas del Calendario */}
+            <View style={styles.calendarFooter}>
+              <View style={styles.legendRow}>
+                <View style={styles.legendDot} />
+                <Text style={styles.legendText}>Días con clases reservadas</Text>
+              </View>
+
+              <View style={styles.calendarActionButtons}>
+                <TouchableOpacity
+                  style={styles.calQuickBtn}
+                  onPress={() => seleccionarFechaCalendario(hoyISO)}
+                >
+                  <Ionicons name="today-outline" size={14} color={colors.primary} style={{ marginRight: 4 }} />
+                  <Text style={styles.calQuickBtnText}>Ir a Hoy</Text>
+                </TouchableOpacity>
+
+                {fechaExacta && (
+                  <TouchableOpacity
+                    style={[styles.calQuickBtn, { borderColor: colors.danger }]}
+                    onPress={limpiarFiltroFecha}
+                  >
+                    <Ionicons name="refresh-outline" size={14} color={colors.danger} style={{ marginRight: 4 }} />
+                    <Text style={[styles.calQuickBtnText, { color: colors.danger }]}>Todas</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* =========================================================================
+          MODAL DE REPROGRAMACIÓN DE CLASE (Regla de > 1 hora)
+          ========================================================================= */}
       <Modal
         visible={modalVisible}
+        transparent
         animationType="slide"
-        transparent={true}
         onRequestClose={() => setModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContainer}>
             <View style={styles.modalHeader}>
               <View>
-                <Text style={styles.modalTitle}>Reprogramar Sesión</Text>
+                <Text style={styles.modalTitle}>Reprogramar Clase</Text>
                 <Text style={styles.modalSub}>
-                  {reservaSeleccionada?.clase_nombre} • Actual: {reservaSeleccionada?.hora_inicio?.substring(0, 5)}
+                  {reservaSeleccionada?.clase_nombre} • {formatearFecha(reservaSeleccionada?.fecha)}
                 </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                  <Ionicons name="person" size={12} color={colors.primary} style={{ marginRight: 4 }} />
+                  <Text style={{ fontSize: 12, color: colors.primary, fontWeight: '700' }}>
+                    Coach: {reservaSeleccionada?.entrenador_nombre || 'Asignado'} (Próximos 7 días)
+                  </Text>
+                </View>
               </View>
               <TouchableOpacity
-                onPress={() => setModalVisible(false)}
                 style={styles.modalCloseBtn}
+                onPress={() => setModalVisible(false)}
               >
-                <Ionicons name="close" size={22} color={colors.textSecondary} />
+                <Ionicons name="close" size={24} color={colors.textPrimary} />
               </TouchableOpacity>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 480 }}>
-              {/* Alerta de regla de 24 horas */}
+            <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 420 }}>
               <View style={styles.ruleNotice}>
-                <Ionicons name="time" size={18} color={colors.accent} style={{ marginRight: 8 }} />
+                <Ionicons name="shield-checkmark" size={18} color={colors.accent} style={{ marginRight: 8 }} />
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.ruleNoticeTitle}>Política de 1 Hora SmartGym</Text>
+                  <Text style={styles.ruleNoticeTitle}>Regla de Instructor & Fecha Límite</Text>
                   <Text style={styles.ruleNoticeDesc}>
-                    Las cancelaciones y reprogramaciones aplican hasta con 1 hora de anticipación al inicio de la sesión. El cupo anterior se libera de inmediato.
+                    Se muestran únicamente las clases posteriores del mismo profesor ({reservaSeleccionada?.entrenador_nombre || 'asignado'}) dentro de los próximos 7 días a partir de hoy.
                   </Text>
                 </View>
               </View>
 
-              {/* Paso 1: Seleccionar nuevo horario */}
-              <Text style={styles.modalSectionLabel}>1. Elige tu nuevo horario disponible</Text>
+              <Text style={styles.modalSectionLabel}>1. Selecciona el nuevo horario disponible</Text>
               {loadingHorarios ? (
-                <ActivityIndicator color={colors.primary} style={{ marginVertical: 20 }} />
+                <ActivityIndicator size="small" color={colors.primary} style={{ marginVertical: 14 }} />
               ) : horariosDisponibles.length === 0 ? (
-                <Text style={styles.noHorariosText}>
-                  No hay otros horarios con cupos disponibles para cambiar en este momento.
-                </Text>
+                <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.3)', borderWidth: 1, borderRadius: 10, padding: 14, marginVertical: 10 }}>
+                  <Text style={[styles.noHorariosText, { color: '#FCA5A5', marginVertical: 0 }]}>
+                    No hay otras clases posteriores disponibles con el coach {reservaSeleccionada?.entrenador_nombre || 'asignado'} dentro de los próximos 7 días con cupos libres.
+                  </Text>
+                </View>
               ) : (
                 horariosDisponibles.map((h) => {
                   const isSelected = nuevoHorarioId === h.id_horario;
-                  const fObj = new Date(h.fecha);
-                  const fStr = fObj.toLocaleDateString('es-PE', {
-                    weekday: 'short',
-                    day: 'numeric',
-                    month: 'short',
-                  });
-
                   return (
                     <TouchableOpacity
                       key={h.id_horario}
-                      style={[styles.scheduleOption, isSelected && styles.scheduleOptionSelected]}
+                      style={[
+                        styles.scheduleOption,
+                        isSelected && styles.scheduleOptionSelected,
+                      ]}
                       onPress={() => setNuevoHorarioId(h.id_horario)}
                     >
                       <View style={{ flex: 1 }}>
-                        <Text style={[styles.optClaseTitle, isSelected && { color: colors.primary }]}>
-                          {h.clase_nombre}
-                        </Text>
+                        <Text style={styles.optClaseTitle}>{h.clase_nombre}</Text>
                         <Text style={styles.optClaseSub}>
-                          📅 {fStr} • ⏰ {h.hora_inicio?.substring(0, 5)} - {h.hora_fin?.substring(0, 5)}
+                          {formatearFecha(h.fecha)} • {h.hora_inicio?.substring(0, 5)} - {h.hora_fin?.substring(0, 5)}
                         </Text>
                         <Text style={styles.optCoach}>
-                          Instructor: {h.entrenador_nombre} • {h.cupos_disponibles} cupos libres
+                          Coach: {h.entrenador_nombre || 'Asignado'} • {h.cupos_disponibles} cupos libres
                         </Text>
                       </View>
                       <Ionicons
                         name={isSelected ? 'radio-button-on' : 'radio-button-off'}
-                        size={22}
+                        size={20}
                         color={isSelected ? colors.primary : colors.textMuted}
                       />
                     </TouchableOpacity>
@@ -640,38 +1039,35 @@ export default function MisReservasScreen() {
                 })
               )}
 
-              {/* Paso 2: Motivo de la reprogramación */}
-              <Text style={[styles.modalSectionLabel, { marginTop: 18 }]}>2. Motivo del cambio (Opcional)</Text>
+              <Text style={[styles.modalSectionLabel, { marginTop: 16 }]}>2. Motivo de la reprogramación</Text>
               <View style={styles.motivosGrid}>
-                {MOTIVOS_PREDETERMINADOS.map((mot) => {
-                  const isMotivoSelected = motivoSeleccionado === mot;
+                {MOTIVOS_PREDETERMINADOS.map((motivo) => {
+                  const isSel = motivoSeleccionado === motivo;
                   return (
                     <TouchableOpacity
-                      key={mot}
-                      style={[styles.motivoChip, isMotivoSelected && styles.motivoChipSelected]}
-                      onPress={() => setMotivoSeleccionado(mot)}
+                      key={motivo}
+                      style={[styles.motivoChip, isSel && styles.motivoChipSelected]}
+                      onPress={() => setMotivoSeleccionado(motivo)}
                     >
-                      <Text
-                        style={[
-                          styles.motivoChipText,
-                          isMotivoSelected && styles.motivoChipTextSelected,
-                        ]}
-                      >
-                        {mot}
+                      <Text style={[styles.motivoChipText, isSel && styles.motivoChipTextSelected]}>
+                        {motivo}
                       </Text>
                     </TouchableOpacity>
                   );
                 })}
               </View>
 
-              <TextInput
-                style={styles.motivoInput}
-                placeholder="Detalle adicional (ej: Tengo guardia en el trabajo)..."
-                placeholderTextColor={colors.textMuted}
-                value={motivoTexto}
-                onChangeText={setMotivoTexto}
-                maxLength={150}
-              />
+              {motivoSeleccionado === 'Otro motivo' && (
+                <TextInput
+                  style={styles.motivoInput}
+                  placeholder="Detalla brevemente tu motivo..."
+                  placeholderTextColor={colors.textMuted}
+                  value={motivoTexto}
+                  onChangeText={setMotivoTexto}
+                  multiline
+                  numberOfLines={2}
+                />
+              )}
             </ScrollView>
 
             <View style={styles.modalActions}>
@@ -685,16 +1081,16 @@ export default function MisReservasScreen() {
               <TouchableOpacity
                 style={[
                   styles.confirmReprogramBtn,
-                  (!nuevoHorarioId || guardandoReprogramacion) && { opacity: 0.5 },
+                  (!nuevoHorarioId || guardandoReprogramacion) && { opacity: 0.6 },
                 ]}
                 disabled={!nuevoHorarioId || guardandoReprogramacion}
-                onPress={confirmarReprogramacion}
+                onPress={ejecutarReprogramacion}
               >
                 {guardandoReprogramacion ? (
                   <ActivityIndicator size="small" color="#FFF" />
                 ) : (
                   <>
-                    <Ionicons name="checkmark-sharp" size={16} color="#FFF" style={{ marginRight: 6 }} />
+                    <Ionicons name="checkmark-done" size={16} color="#FFF" style={{ marginRight: 6 }} />
                     <Text style={styles.confirmReprogramBtnText}>Confirmar Cambio</Text>
                   </>
                 )}
@@ -713,26 +1109,27 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   screenHeader: {
-    padding: 20,
-    paddingBottom: 8,
-    paddingTop: 45,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 12,
   },
   screenTitle: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '800',
     color: colors.textPrimary,
-    marginBottom: 4,
   },
   screenSubtitle: {
-    fontSize: 13,
+    fontSize: 12,
     color: colors.textSecondary,
-    marginBottom: 14,
+    marginTop: 2,
+    marginBottom: 10,
+    lineHeight: 16,
   },
   tabsContainer: {
     flexDirection: 'row',
     backgroundColor: colors.surface,
-    borderRadius: 14,
-    padding: 4,
+    borderRadius: 12,
+    padding: 3,
     borderWidth: 1,
     borderColor: colors.border,
   },
@@ -740,15 +1137,15 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 10,
     alignItems: 'center',
-    borderRadius: 10,
+    borderRadius: 9,
   },
   activeTab: {
     backgroundColor: colors.primary,
   },
   tabText: {
-    color: colors.textSecondary,
     fontSize: 13,
     fontWeight: '700',
+    color: colors.textSecondary,
   },
   activeTabText: {
     color: '#FFF',
@@ -758,38 +1155,39 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.surface,
     marginHorizontal: 16,
-    marginTop: 6,
-    marginBottom: 6,
+    marginBottom: 8,
     paddingHorizontal: 12,
-    borderRadius: 10,
+    paddingVertical: 9,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: colors.border,
-    height: 40,
   },
   searchInput: {
     flex: 1,
     color: colors.textPrimary,
     fontSize: 13,
+    padding: 0,
   },
   filtersSection: {
-    marginBottom: 4,
+    paddingHorizontal: 16,
+    marginBottom: 6,
   },
   filterScroll: {
-    paddingHorizontal: 16,
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
   },
   filterLabel: {
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '700',
     color: colors.textMuted,
-    marginRight: 4,
+    marginRight: 2,
+    textTransform: 'uppercase',
   },
   filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
     backgroundColor: colors.surface,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
     borderWidth: 1,
     borderColor: colors.border,
   },
@@ -805,6 +1203,25 @@ const styles = StyleSheet.create({
   filterChipTextSelected: {
     color: '#FFF',
     fontWeight: '800',
+  },
+  calendarFilterBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 87, 34, 0.12)',
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  calendarFilterBtnActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  calendarFilterBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.primary,
   },
   countRow: {
     paddingHorizontal: 20,
@@ -866,6 +1283,48 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 13,
   },
+
+  // Badges de Asistencia
+  asistenciaBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  asistenciaBadgeVerde: {
+    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+  },
+  asistenciaTextVerde: {
+    color: '#10B981',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  asistenciaBadgeRojo: {
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+  },
+  asistenciaTextRojo: {
+    color: '#EF4444',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  asistenciaBadgeAzul: {
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+  },
+  asistenciaTextAzul: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  asistenciaBadgeGris: {
+    backgroundColor: 'rgba(100, 116, 139, 0.14)',
+  },
+  asistenciaTextGris: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
   actionRow: {
     borderTopWidth: 1,
     borderTopColor: colors.border,
@@ -909,20 +1368,42 @@ const styles = StyleSheet.create({
   },
   emptyContainer: {
     alignItems: 'center',
-    marginTop: 50,
+    marginTop: 40,
+    paddingHorizontal: 20,
+  },
+  emptyTitle: {
+    color: colors.textPrimary,
+    fontSize: 15,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginBottom: 6,
   },
   emptyText: {
     color: colors.textSecondary,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: 'center',
-    paddingHorizontal: 20,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  clearFilterBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  clearFilterBtnText: {
+    color: '#FFF',
+    fontSize: 12,
+    fontWeight: '700',
   },
   iconTextRow: {
     flexDirection: 'row',
     alignItems: 'center',
   },
 
-  // Estilos del Modal
+  // Modal de Reprogramación
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.75)',
@@ -1108,5 +1589,160 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     flex: 1,
+  },
+
+  // Estilos del Modal de Calendario
+  calendarModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  calendarModalContent: {
+    width: '100%',
+    maxWidth: 390,
+    backgroundColor: colors.surface,
+    borderRadius: 20,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  calendarHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  calendarModalTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  calendarModalSubtitle: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  monthNavRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    marginBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  monthNavBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: colors.surfaceLight,
+  },
+  monthNavText: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  weekDaysRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 8,
+  },
+  weekDayHeader: {
+    width: 40,
+    textAlign: 'center',
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  calendarGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-around',
+  },
+  calendarDayEmpty: {
+    width: 40,
+    height: 40,
+    marginVertical: 2,
+  },
+  calendarDayCell: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginVertical: 2,
+    borderRadius: 10,
+    backgroundColor: colors.surfaceLight,
+    position: 'relative',
+  },
+  calendarDayCellToday: {
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+  },
+  calendarDayCellSelected: {
+    backgroundColor: colors.primary,
+  },
+  calendarDayNumber: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  calendarDayNumberToday: {
+    color: colors.primary,
+    fontWeight: '800',
+  },
+  calendarDayNumberSelected: {
+    color: '#FFF',
+    fontWeight: '800',
+  },
+  calendarDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.primary,
+    position: 'absolute',
+    bottom: 4,
+  },
+  calendarFooter: {
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  legendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  legendDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: colors.primary,
+    marginRight: 6,
+  },
+  legendText: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  calendarActionButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  calQuickBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: colors.surfaceLight,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  calQuickBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primary,
   },
 });

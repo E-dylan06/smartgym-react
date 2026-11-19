@@ -11,7 +11,7 @@ import api from '../config/api';
 const NotificationContext = createContext(null);
 
 export const NotificationProvider = ({ children }) => {
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [connected, setConnected] = useState(false);
@@ -68,22 +68,26 @@ export const NotificationProvider = ({ children }) => {
       // 2. Registrar Expo Push Token en el backend
       registerForPushNotificationsAsync(api);
 
-      // 3. Conectar a Socket.IO
-      connectNotificationSocket(user, (notif) => {
-        if (!active) return;
-        // Cuando llega una notificación nueva en tiempo real
-        const nuevaNotif = {
-          id_notificacion: notif.data?.id_notificacion || Date.now(),
-          titulo: notif.title,
-          mensaje: notif.body,
-          tipo: notif.data?.tipo || 'alerta',
-          leido: 0,
-          fecha_creacion: notif.timestamp || new Date().toISOString(),
-        };
+      // 3. Conectar a Socket.IO con token de autenticación
+      connectNotificationSocket(
+        user,
+        (notif) => {
+          if (!active) return;
+          // Cuando llega una notificación nueva en tiempo real
+          const nuevaNotif = {
+            id_notificacion: notif.data?.id_notificacion || Date.now(),
+            titulo: notif.title,
+            mensaje: notif.body,
+            tipo: notif.data?.tipo || 'alerta',
+            leido: 0,
+            fecha_creacion: notif.timestamp || new Date().toISOString(),
+          };
 
-        setNotifications((prev) => [nuevaNotif, ...prev]);
-        setUnreadCount((prev) => prev + 1);
-      }).then((sock) => {
+          setNotifications((prev) => [nuevaNotif, ...prev]);
+          setUnreadCount((prev) => prev + 1);
+        },
+        token
+      ).then((sock) => {
         if (active && sock) {
           setConnected(true);
         }
